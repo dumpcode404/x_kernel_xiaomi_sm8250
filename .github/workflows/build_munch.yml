@@ -49,14 +49,24 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      KERNEL_TREE: ${{ github.event.inputs.KERNEL_TREE }}
+      KERNEL_TREE_BRANCH: ${{ github.event.inputs.KERNEL_TREE_BRANCH }}
+      KERNELSU_SETUP_URL: ${{ github.event.inputs.KERNELSU_SETUP_URL }}
+      KERNELSU_SETUP_BRANCH: ${{ github.event.inputs.KERNELSU_SETUP_BRANCH }}
+      KERNELSU_PATCHES: ${{ github.event.inputs.KERNELSU_PATCHES }}
+      ANYKERNEL_URL: ${{ github.event.inputs.ANYKERNEL_URL }}
+      ANYKERNEL_BRANCH: ${{ github.event.inputs.ANYKERNEL_BRANCH }}
+      ANYKERNEL_ZIP_NAME: ${{ github.event.inputs.ANYKERNEL_ZIP_NAME }}
+      CLANG_DOWNLOAD_URL: ${{ github.event.inputs.CLANG_DOWNLOAD_URL }}
     steps:
       - name: Display Inputs
         run: |
           echo "::group::Inputs"
-          echo "Kernel Tree: ${{ github.event.inputs.KERNEL_TREE }}/tree/${{ github.event.inputs.KERNEL_TREE_BRANCH }}"
-          echo "KernelSU Setup URL": ${{ github.event.inputs.KERNELSU_SETUP_URL }}
-          echo "KernelSU Branch": ${{ github.event.inputs.KERNELSU_SETUP_BRANCH }}
-          echo "AnyKernel URL: ${{ github.event.inputs.ANYKERNEL_URL }}/tree/${{ github.event.inputs.ANYKERNEL_BRANCH }}"
+          echo "Kernel Tree: $KERNEL_TREE/tree/$KERNEL_TREE_BRANCH"
+          echo "KernelSU Setup URL: $KERNELSU_SETUP_URL"
+          echo "KernelSU Branch: $KERNELSU_SETUP_BRANCH"
+          echo "AnyKernel URL: $ANYKERNEL_URL/tree/$ANYKERNEL_BRANCH"
           echo "::endgroup::"
 
       - name: Cache Clang
@@ -71,25 +81,18 @@ jobs:
       - name: Download and Extract Clang (if not cached)
         if: steps.cache-clang.outputs.cache-hit != 'true'
         run: |
-          wget "${{ github.event.inputs.CLANG_DOWNLOAD_URL }}" -O clang.tar.zst
+          set -e
+          wget -q "$CLANG_DOWNLOAD_URL" -O clang.tar.zst
           mkdir -p clang
           tar --zstd -xf clang.tar.zst -C clang
-
-          # extract toolchain from the parent directory (if exists)
-          cd clang
-          if [ -d clang-* ]; then
-            mv clang-*/* .
-          fi
-          cd ..
-
           rm clang.tar.zst
 
       - name: Initialize workspace
-        run: |
-          echo "tools_folder=$(pwd)" >> $GITHUB_OUTPUT
-          git clone --depth=1 "${{ github.event.inputs.KERNEL_TREE }}" -b "${{ github.event.inputs.KERNEL_TREE_BRANCH }}" kernel_tree
-          echo "kernel_folder=$(pwd)/kernel_tree" >> $GITHUB_OUTPUT
         id: workspace
+        run: |
+          set -e
+          git clone --depth=1 "$KERNEL_TREE" -b "$KERNEL_TREE_BRANCH" kernel_tree
+          echo "kernel_folder=$(pwd)/kernel_tree" >> "$GITHUB_OUTPUT"
 
       - name: Install Dependencies
         run: |
@@ -113,30 +116,28 @@ jobs:
 
       - name: Setup Toolchain
         run: |
-          CLANG_DIR=$(find $GITHUB_WORKSPACE/clang -type d -name bin | head -1)
-
+          set -e
+          CLANG_DIR=$(find "$GITHUB_WORKSPACE/clang" -type d -name bin | head -1)
           echo "CLANG_DIR=$CLANG_DIR"
+          echo "$CLANG_DIR" >> "$GITHUB_PATH"
+          "$CLANG_DIR/clang" --version
 
-          export PATH=$CLANG_DIR:$PATH
-
-          which clang
-          clang --version
-
-          echo "PATH=$PATH" >> $GITHUB_ENV
-          
       - name: Building kernel
+        working-directory: ${{ steps.workspace.outputs.kernel_folder }}
         run: |
+          set -eo pipefail
           export ARCH=arm64
           export SUBARCH=arm64
           export KBUILD_BUILD_USER="build-user"
           export KBUILD_BUILD_HOST="build-host 4.19.404R"
 
-          if [[ -n "${{ github.event.inputs.KERNELSU_SETUP_URL }}" && -n "${{ github.event.inputs.KERNELSU_SETUP_BRANCH }}" ]]; then
-            curl -LSs "${{ github.event.inputs.KERNELSU_SETUP_URL }}" | bash -s ${{ github.event.inputs.KERNELSU_SETUP_BRANCH }}
-            if [ -n "${{ github.event.inputs.KERNELSU_PATCHES }}" ]; then
+          if [[ -n "$KERNELSU_SETUP_URL" && -n "$KERNELSU_SETUP_BRANCH" ]]; then
+            curl -LSs "$KERNELSU_SETUP_URL" | bash -s "$KERNELSU_SETUP_BRANCH"
+            if [ -n "$KERNELSU_PATCHES" ]; then
               cd Kernel*
-              echo "${{ github.event.inputs.KERNELSU_PATCHES }}" | tr ',' '\n' | while read -r PATCH; do
+              echo "$KERNELSU_PATCHES" | tr ',' '\n' | while read -r PATCH; do
                 TRIMMED=$(echo "$PATCH" | xargs)
+                [ -z "$TRIMMED" ] && continue
                 TEMP_PATCH_FILE="/tmp/downloaded_patch_$(date +%s%N).patch"
                 curl -fsSL "$TRIMMED" -o "$TEMP_PATCH_FILE"
                 patch -p1 < "$TEMP_PATCH_FILE"
@@ -145,56 +146,70 @@ jobs:
             fi
           fi
 
-        make O=out vendor/munch_defconfig
+          make O=out vendor/munch_defconfig
 
-        make -j$(nproc) \
-        O=out \
-        CC=clang \
-        LLVM=1 \
-        LLVM_IAS=1 \
-        CLANG_TRIPLE=aarch64-linux-gnu- \
-        CROSS_COMPILE=aarch64-linux-gnu- \
-        CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-        Image dtbs
-
-        working-directory: ${{ steps.workspace.outputs.kernel_folder }}
+          make -j"$(nproc)" \
+            O=out \
+            CC=clang \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            Image dtbs
 
       - name: Build dtb and dtbo.img
         working-directory: ${{ steps.workspace.outputs.kernel_folder }}
         run: |
+          set -eo pipefail
           BOOT=out/arch/arm64/boot
-          DTS=$BOOT/dts/vendor/qcom
 
-          ls $DTS | head -50
+          # cari folder dts secara otomatis (vendor/qcom atau qcom)
+          FIRST_DTB=$(find "$BOOT/dts" -name '*.dtb' | head -1)
+          if [ -z "$FIRST_DTB" ]; then
+            echo "::error::Tidak ada file .dtb. Cek hasil build dtbs."
+            exit 1
+          fi
+          DTS=$(dirname "$FIRST_DTB")
+          echo "DTS dir: $DTS"
+          ls "$DTS" | head -50
 
           # dtb = gabungan semua base dtb
-          cat $DTS/*.dtb > $BOOT/dtb.img
+          cat "$DTS"/*.dtb > "$BOOT/dtb.img"
 
-          # mkdtboimg: pakai punya kernel kalau ada, kalau nggak download dari AOSP
+          # dtbo.img dari overlay
+          if ! ls "$DTS"/*.dtbo >/dev/null 2>&1; then
+            echo "::error::Tidak ada file .dtbo. Pastikan CONFIG_BUILD_ARM64_DT_OVERLAY=y di defconfig."
+            exit 1
+          fi
+
+          # pakai mkdtboimg milik kernel kalau ada, kalau tidak download dari AOSP
           MKDTBO=$(find . -name mkdtboimg.py | head -1)
           if [ -z "$MKDTBO" ]; then
             curl -fsSL "https://android.googlesource.com/platform/system/libufdt/+/refs/heads/master/utils/src/mkdtboimg.py?format=TEXT" | base64 -d > /tmp/mkdtboimg.py
             MKDTBO=/tmp/mkdtboimg.py
           fi
 
-          python3 "$MKDTBO" create $BOOT/dtbo.img --page_size=4096 $DTS/*.dtbo
-          ls -lh $BOOT/dtb.img $BOOT/dtbo.img
+          python3 "$MKDTBO" create "$BOOT/dtbo.img" --page_size=4096 "$DTS"/*.dtbo
+          ls -lh "$BOOT/dtb.img" "$BOOT/dtbo.img"
 
       - name: Debug boot files
         working-directory: ${{ steps.workspace.outputs.kernel_folder }}
         run: |
-          find out/arch/arm64/boot -type f | grep -E "Image|dtb|dtbo"
+          find out/arch/arm64/boot -maxdepth 1 -type f | grep -E "Image|dtb|dtbo" || true
 
       - name: "Upload Image"
         uses: actions/upload-artifact@v4
         with:
           name: Image
           path: ${{ steps.workspace.outputs.kernel_folder }}/out/arch/arm64/boot/Image
+
       - name: "Upload dtb"
         uses: actions/upload-artifact@v4
         with:
           name: dtb
           path: ${{ steps.workspace.outputs.kernel_folder }}/out/arch/arm64/boot/dtb.img
+
       - name: "Upload dtbo.img (AOSP)"
         uses: actions/upload-artifact@v4
         with:
@@ -203,29 +218,23 @@ jobs:
 
       - name: AnyKernel3
         if: ${{ success() && github.event.inputs.ANYKERNEL_URL != '' && github.event.inputs.ANYKERNEL_BRANCH != '' && github.event.inputs.ANYKERNEL_ZIP_NAME != '' }}
-        run: |
-          git clone --recursive --depth=1 ${{ github.event.inputs.ANYKERNEL_URL }} -b ${{ github.event.inputs.ANYKERNEL_BRANCH }} AnyKernel3
-          if [ -e "Image" ]; then
-            cp -f Image AnyKernel3
-          fi
-          if [ -e "dtb.img" ]; then
-            cp -f dtb.img AnyKernel3/dtb
-          fi
-          if [ -e "dtbo.img" ]; then
-            cp -f dtbo.img AnyKernel3
-          fi
-          cd AnyKernel3
-          zip -q -r "${{ github.event.inputs.ANYKERNEL_ZIP_NAME }}.zip" *
-          mv "${{ github.event.inputs.ANYKERNEL_ZIP_NAME }}.zip" ../
         working-directory: ${{ steps.workspace.outputs.kernel_folder }}/out/arch/arm64/boot/
+        run: |
+          set -e
+          git clone --recursive --depth=1 "$ANYKERNEL_URL" -b "$ANYKERNEL_BRANCH" AnyKernel3
+          cp -f Image AnyKernel3/
+          cp -f dtb.img AnyKernel3/dtb
+          cp -f dtbo.img AnyKernel3/
+          cd AnyKernel3
+          zip -q -r "$ANYKERNEL_ZIP_NAME.zip" * -x ".git*"
+          mv "$ANYKERNEL_ZIP_NAME.zip" ../
 
       - name: "Upload AnyKernel"
-        uses: actions/upload-artifact@v4
         if: ${{ success() && github.event.inputs.ANYKERNEL_URL != '' && github.event.inputs.ANYKERNEL_BRANCH != '' && github.event.inputs.ANYKERNEL_ZIP_NAME != '' }}
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ github.event.inputs.ANYKERNEL_ZIP_NAME }}
           path: |
             ${{ steps.workspace.outputs.kernel_folder }}/out/arch/arm64/boot/AnyKernel3/
             !${{ steps.workspace.outputs.kernel_folder }}/out/arch/arm64/boot/AnyKernel3/.git
             !${{ steps.workspace.outputs.kernel_folder }}/out/arch/arm64/boot/AnyKernel3/.github
-            
