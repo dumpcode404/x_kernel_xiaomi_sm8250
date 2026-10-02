@@ -174,14 +174,32 @@ jobs:
           echo "DTS dir: $DTS"
           ls "$DTS" | head -50
 
-          # dtb = gabungan semua base dtb
-          cat "$DTS"/*.dtb > "$BOOT/dtb.img"
+          # dtb = gabungan 3 base dtb kona (sesuai Makefile dts)
+          for f in kona.dtb kona-v2.dtb kona-v2.1.dtb; do
+            if [ ! -f "$DTS/$f" ]; then
+              echo "::error::$f tidak ditemukan di $DTS"
+              exit 1
+            fi
+          done
+          cat "$DTS/kona.dtb" "$DTS/kona-v2.dtb" "$DTS/kona-v2.1.dtb" > "$BOOT/dtb.img"
 
           # dtbo.img dari overlay
           if ! ls "$DTS"/*.dtbo >/dev/null 2>&1; then
             echo "::error::Tidak ada file .dtbo. Pastikan CONFIG_BUILD_ARM64_DT_OVERLAY=y di defconfig."
             exit 1
           fi
+
+          echo "::group::Semua overlay (.dtbo)"
+          ls -l "$DTS"/*.dtbo
+          echo "::endgroup::"
+
+          # hanya overlay munch (sesuai Makefile dts: munch-sm8250-overlay.dtbo)
+          DTBO_FILES="$DTS/munch-sm8250-overlay.dtbo"
+          if [ ! -f "$DTBO_FILES" ]; then
+            echo "::error::munch-sm8250-overlay.dtbo tidak ditemukan. Cek CONFIG_MACH_XIAOMI dan CONFIG_MACH_XIAOMI_SM8250 di defconfig."
+            exit 1
+          fi
+          echo "Pakai overlay: $DTBO_FILES"
 
           # pakai mkdtboimg milik kernel kalau ada, kalau tidak download dari AOSP
           MKDTBO=$(find . -name mkdtboimg.py | head -1)
@@ -190,7 +208,8 @@ jobs:
             MKDTBO=/tmp/mkdtboimg.py
           fi
 
-          python3 "$MKDTBO" create "$BOOT/dtbo.img" --page_size=4096 "$DTS"/*.dtbo
+          # shellcheck disable=SC2086
+          python3 "$MKDTBO" create "$BOOT/dtbo.img" --page_size=4096 $DTBO_FILES
           ls -lh "$BOOT/dtb.img" "$BOOT/dtbo.img"
 
       - name: Debug boot files
