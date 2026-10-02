@@ -145,17 +145,40 @@ jobs:
             fi
           fi
 
-          make O=out vendor/munch_defconfig
+        make O=out vendor/munch_defconfig
 
-          make -j$(nproc) \
-            O=out \
-            CC=clang \
-            LLVM=1 \
-            LLVM_IAS=1 \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+        make -j$(nproc) \
+        O=out \
+        CC=clang \
+        LLVM=1 \
+        LLVM_IAS=1 \
+        CLANG_TRIPLE=aarch64-linux-gnu- \
+        CROSS_COMPILE=aarch64-linux-gnu- \
+        CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+        Image dtbs
+
         working-directory: ${{ steps.workspace.outputs.kernel_folder }}
+
+      - name: Build dtb and dtbo.img
+        working-directory: ${{ steps.workspace.outputs.kernel_folder }}
+        run: |
+          BOOT=out/arch/arm64/boot
+          DTS=$BOOT/dts/vendor/qcom
+
+          ls $DTS | head -50
+
+          # dtb = gabungan semua base dtb
+          cat $DTS/*.dtb > $BOOT/dtb.img
+
+          # mkdtboimg: pakai punya kernel kalau ada, kalau nggak download dari AOSP
+          MKDTBO=$(find . -name mkdtboimg.py | head -1)
+          if [ -z "$MKDTBO" ]; then
+            curl -fsSL "https://android.googlesource.com/platform/system/libufdt/+/refs/heads/master/utils/src/mkdtboimg.py?format=TEXT" | base64 -d > /tmp/mkdtboimg.py
+            MKDTBO=/tmp/mkdtboimg.py
+          fi
+
+          python3 "$MKDTBO" create $BOOT/dtbo.img --page_size=4096 $DTS/*.dtbo
+          ls -lh $BOOT/dtb.img $BOOT/dtbo.img
 
       - name: Debug boot files
         working-directory: ${{ steps.workspace.outputs.kernel_folder }}
